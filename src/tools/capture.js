@@ -6,7 +6,7 @@ export function registerCaptureTools(server) {
   server.tool('capture_screenshot', 'Take a screenshot of the TradingView chart', {
     region: z.string().optional().describe('Region to capture: full, chart, strategy_tester (default full)'),
     filename: z.string().optional().describe('Custom filename (without extension)'),
-    method: z.string().optional().describe('Capture method: cdp (Page.captureScreenshot) or api (chartWidgetCollection.takeScreenshot) (default cdp)'),
+    method: z.string().optional().describe('Capture method: native (TradingView clientSnapshot — composited canvas at TV\'s export resolution, viewport-independent, DEFAULT), cdp (Page.captureScreenshot fallback with 1920x1080 viewport override), or api (triggers TradingView UI flow only). Default: native first, falls back to cdp if native fails.'),
     viewport: z.object({
       width: z.number().int().positive(),
       height: z.number().int().positive(),
