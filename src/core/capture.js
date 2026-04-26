@@ -2,6 +2,7 @@
  * Core screenshot/capture logic.
  */
 import { getClient, evaluate, getChartCollection } from '../connection.js';
+import { getViewportFromProfile, DEFAULT_VIEWPORT_PROFILE } from './window.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -64,7 +65,7 @@ async function captureViaNativeCanvas(client, filePath) {
   };
 }
 
-export async function captureScreenshot({ region, filename, method, viewport } = {}) {
+export async function captureScreenshot({ region, filename, method, viewport, profile } = {}) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -124,12 +125,23 @@ export async function captureScreenshot({ region, filename, method, viewport } =
   // doesn't regress to the small/letterboxed mess the original CDP path
   // produced when TV's window is narrow. Native canvas is still the
   // preferred path — this is a safety net.
-  // Caller can override the fallback viewport via the `viewport` parameter
-  // (threaded from the MCP tool surface). Default 1920x1080 landscape.
-  const FALLBACK_VIEWPORT = {
-    width: Number(viewport?.width) > 0 ? Number(viewport.width) : 1920,
-    height: Number(viewport?.height) > 0 ? Number(viewport.height) : 1080,
-  };
+  // Resolve fallback viewport in priority order:
+  //   1. explicit { viewport: { width, height } } from caller
+  //   2. named `profile` from window.js (desktop/macbook/monitor/ipad/iphone)
+  //   3. desktop default (1920x1080)
+  // The native path above doesn't need any of this — it captures TV's own
+  // composited canvas at TV's intended export resolution. These options
+  // only control the CDP fallback's emulated viewport.
+  let fallbackViewport = null;
+  if (Number(viewport?.width) > 0 && Number(viewport?.height) > 0) {
+    fallbackViewport = { width: Number(viewport.width), height: Number(viewport.height) };
+  } else if (profile) {
+    fallbackViewport = getViewportFromProfile(profile);
+  }
+  if (!fallbackViewport) {
+    fallbackViewport = getViewportFromProfile(DEFAULT_VIEWPORT_PROFILE) || { width: 1920, height: 1080 };
+  }
+  const FALLBACK_VIEWPORT = fallbackViewport;
   const VIEWPORT_SETTLE_MS = 350;
 
   let overrideApplied = false;
