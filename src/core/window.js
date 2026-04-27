@@ -31,9 +31,9 @@ export const WINDOW_PROFILES = {
     description: 'Generic desktop landscape — used for CDP-fallback viewport override',
   },
   macbook: {
-    osBounds: { position: [0, 34], size: [1722, 1083] },
-    viewport: { width: 1722, height: 1083 },
-    description: 'MacBook display profile — confirmed working window size on built-in screen',
+    osBounds: { position: [0, 34], size: [1260, 880] },
+    viewport: { width: 1260, height: 880 },
+    description: 'MacBook built-in display profile — fits a 1288x946 logical resolution (HiDPI 2576x1892 scaled @ 200%) with a small inset to avoid OS-level clamping. Earlier 1722x1083 value was for a different display configuration; macOS truncated it to fit.',
   },
   monitor: {
     osBounds: { position: [697, 168], size: [2189, 1244] },
