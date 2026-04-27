@@ -88,19 +88,31 @@ export function registerChartViewTools(server) {
     }
   );
 
-  server.tool(
-    'chart_set_visible_price_range',
-    'Attempt to set the chart Y-axis to a specific price range. CURRENTLY UNRELIABLE on TV Desktop — TV\'s internal setPriceRange rejects plain objects (requires its private PriceRange class). Returns success:false with a recommendation when blocked. Recommended workflow when this fails: chart_fit_content → chart_zoom_in/out to land on a Y-range that includes desired levels → capture with method:"cdp".',
-    {
-      min: z.coerce.number().describe('Lowest price visible (e.g. 78000 for BTC).'),
-      max: z.coerce.number().describe('Highest price visible (e.g. 82000 for BTC).'),
-      lock_auto_scale: z.coerce.boolean().optional().describe('If true (default), disable auto-scale before attempting to set the range.'),
-    },
-    async ({ min, max, lock_auto_scale }) => {
-      try { return jsonResult(await core.setVisiblePriceRange({ min, max, lock_auto_scale })); }
-      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
-    }
-  );
+  // chart_set_visible_price_range — INTENTIONALLY NOT REGISTERED.
+  //
+  // The Y-axis (price) range setter cannot be implemented safely on TV
+  // Desktop right now. TV's internal `setPriceRange` requires a private
+  // `PriceRange` class instance that is not externally constructible.
+  // Every alternative path explored in development (`twoPointsScale`,
+  // `clearPriceRange + setPriceRange`, `setMaxPriceRange / setMinPriceRange`)
+  // silently corrupts the price-axis state into the indicator-pane
+  // scale, requiring a full TF / symbol switch to recover. The corruption
+  // is only visible at capture time.
+  //
+  // We do NOT advertise this tool on the MCP surface. Advertising a
+  // tool that silently no-ops would confuse future AI sessions and
+  // create fake confidence in capture-prep workflows. The core function
+  // (`core.setVisiblePriceRange`) remains as a documented stub so a
+  // future TV build with a constructible PriceRange (or an equivalent
+  // imperative API) can wire it up without changing the surface.
+  //
+  // Recommended workaround for callers needing specific levels in-frame:
+  //   1. chart_fit_content
+  //   2. chart_zoom_in / chart_zoom_out to widen / narrow the X-window
+  //      until TV's auto-Y-fit pulls the desired levels into the visible
+  //      range
+  //   3. capture_screenshot method:"cdp" so the visible range is what
+  //      lands in the captured PNG
 
   server.tool(
     'chart_set_visible_time_range',
