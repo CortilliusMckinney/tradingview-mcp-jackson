@@ -4,6 +4,7 @@
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
+import { resizeTradingViewWindow, DEFAULT_WINDOW_PROFILE } from './window.js';
 
 export async function healthCheck() {
   await getClient();
@@ -159,7 +160,7 @@ export async function uiState() {
   return { success: true, ...state };
 }
 
-export async function launch({ port, kill_existing } = {}) {
+export async function launch({ port, kill_existing, window_profile, skip_window_resize } = {}) {
   const cdpPort = port || 9222;
   const killFirst = kill_existing !== false;
   const platform = process.platform;
@@ -235,10 +236,30 @@ export async function launch({ port, kill_existing } = {}) {
       });
       if (ready) {
         const info = JSON.parse(ready);
+        // Best-effort startup hygiene — resize the visible TV Desktop window
+        // to a usable landscape after CDP is up. Capture correctness does
+        // NOT depend on this; native clientSnapshot exports the chart canvas
+        // regardless of window size. This is purely so the human sees a
+        // usable chart in the visible TV app instead of mobile/mini layout.
+        // Caller can opt out via skip_window_resize:true. Permission errors
+        // (macOS Accessibility) and non-Mac platforms surface as
+        // window_resize.success:false without failing the launch.
+        let window_resize = null;
+        if (!skip_window_resize) {
+          await new Promise(r => setTimeout(r, 1500));
+          try {
+            window_resize = await resizeTradingViewWindow(window_profile || DEFAULT_WINDOW_PROFILE);
+          } catch (err) {
+            window_resize = { success: false, reason: 'resize threw: ' + (err.message || String(err)) };
+          }
+        } else {
+          window_resize = { success: false, reason: 'skipped via skip_window_resize: true' };
+        }
         return {
           success: true, platform, binary: tvPath, pid: child.pid,
           cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
           browser: info.Browser, user_agent: info['User-Agent'],
+          window_resize,
         };
       }
     } catch { /* retry */ }

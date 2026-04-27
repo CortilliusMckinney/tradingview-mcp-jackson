@@ -18,11 +18,13 @@ export function registerHealthTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tv_launch', 'Launch TradingView Desktop with Chrome DevTools Protocol (remote debugging) enabled. Auto-detects install location on Mac, Windows, and Linux.', {
+  server.tool('tv_launch', 'Launch TradingView Desktop with Chrome DevTools Protocol (remote debugging) enabled. Auto-detects install location on Mac, Windows, and Linux. After CDP is responsive, makes a best-effort attempt to resize the TV window to a usable landscape (macbook profile by default) so the visible chart is not stuck in mobile/mini layout. Capture correctness does NOT depend on this resize succeeding.', {
     port: z.coerce.number().optional().describe('CDP port (default 9222)'),
     kill_existing: z.coerce.boolean().optional().describe('Kill existing TradingView instances first (default true)'),
-  }, async ({ port, kill_existing }) => {
-    try { return jsonResult(await core.launch({ port, kill_existing })); }
+    window_profile: z.string().optional().describe('Window profile for the post-launch resize. Default macbook. Other options: monitor, desktop, ipad, iphone. See tv_list_profiles.'),
+    skip_window_resize: z.coerce.boolean().optional().describe('Skip the post-launch window-resize hygiene step (default false). Capture correctness is unaffected either way.'),
+  }, async ({ port, kill_existing, window_profile, skip_window_resize }) => {
+    try { return jsonResult(await core.launch({ port, kill_existing, window_profile, skip_window_resize })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }
