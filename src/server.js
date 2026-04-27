@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerHealthTools } from "./tools/health.js";
 import { registerChartTools } from "./tools/chart.js";
+import { registerChartViewTools } from "./tools/chart-view.js";
 import { registerPineTools } from "./tools/pine.js";
 import { registerDataTools } from "./tools/data.js";
 import { registerCaptureTools } from "./tools/capture.js";
@@ -75,6 +76,7 @@ CONTEXT MANAGEMENT:
 // Register all tool groups
 registerHealthTools(server);
 registerChartTools(server);
+registerChartViewTools(server);
 registerPineTools(server);
 registerDataTools(server);
 registerCaptureTools(server);
