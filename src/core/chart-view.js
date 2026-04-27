@@ -56,6 +56,28 @@ function unwrap(raw) {
 // X-axis transform helper: read current visible bar range (indices), apply
 // a transform fn(fromIdx, toIdx) -> {fromIdx, toIdx}, then call
 // zoomToBarsRange. Returns before/after for caller verification.
+//
+// Guardrails added after the PR #2 paused-state finding: TV Desktop's
+// bars.firstIndex() can return a negative number (TV uses negative
+// logical-bar coords for "before the data" positioning slots). If we
+// asked timeScale.zoomToBarsRange() to land in that negative range,
+// the chart renderer wedged — price-axis labels rendered but candles
+// stopped painting and the only recovery was a TF/symbol switch.
+//
+// Now we:
+//   1. Scan from max(firstIdx, 0) upward to find the first index where
+//      bars.valueAt(i) is non-null — that is the real start of the
+//      data, never negative.
+//   2. Clamp the transform output's fromIdx >= firstDataIdx, not just
+//      >= firstIdx.
+//   3. After clamping, verify bars.valueAt(fromIdx) is non-null. If
+//      not, refuse the operation with a clear reason instead of
+//      silently wedging the renderer.
+//   4. Refuse windows with fewer than 5 bars.
+//
+// Refusing > wedging: the renderer-wedge state is silent until capture
+// time, and recovery is invasive (machine restart, in some cases).
+// Returning ok:false with a reason is strictly better.
 async function transformXBars(transformExpr, label) {
   const result = await evalJson(`
     (function(){
@@ -68,29 +90,77 @@ async function transformXBars(transformExpr, label) {
       if (!ts || !bars) return { ok: false, reason: 'no timeScale or bars' };
       const firstIdx = bars.firstIndex();
       const lastIdx = bars.lastIndex();
-      // Read current visible bar logical range (indices, not seconds)
+
+      // Guardrail #1: find first AND last index with actual bar data.
+      // Negative indices can legitimately contain data on TV Desktop —
+      // a fresh BTCUSDT 15m chart on this build has data starting at
+      // bar index -1829. The guardrail must be data-aware, not
+      // zero-clamping. We scan from firstIdx (signed) and accept the
+      // first index where bars.valueAt() returns non-null.
+      //
+      // The stuck-renderer mode we saw earlier in PR #2 review is NOT
+      // caused by negative indices — it's caused by zoom_out producing
+      // a window that has NO data at the requested fromIdx (e.g. zooming
+      // to a region beyond where bars exist). The guardrail rejects
+      // that case, regardless of sign.
+      let firstDataIdx = null;
+      let lastDataIdx = null;
+      for (let i = firstIdx; i <= lastIdx; i++) {
+        if (bars.valueAt(i)) {
+          if (firstDataIdx === null) firstDataIdx = i;
+          lastDataIdx = i;
+        }
+      }
+      if (firstDataIdx === null) {
+        return { ok: false, reason: 'no data bars found in range', firstIdx, lastIdx };
+      }
+
+      // Map current visible range (unix seconds) to bar indices, using
+      // the data-aware bounds.
       const vbr = w.getVisibleBarsRange ? w.getVisibleBarsRange() : null;
-      // getVisibleBarsRange returns {from, to} as unix seconds — convert to indices
-      let curFromIdx = firstIdx, curToIdx = lastIdx;
+      let curFromIdx = firstDataIdx, curToIdx = lastDataIdx;
       if (vbr) {
-        for (let i = firstIdx; i <= lastIdx; i++) {
+        for (let i = firstDataIdx; i <= lastDataIdx; i++) {
           const v = bars.valueAt(i);
           if (!v) continue;
-          if (v[0] >= vbr.from && curFromIdx === firstIdx) curFromIdx = i;
+          if (v[0] >= vbr.from && curFromIdx === firstDataIdx) curFromIdx = i;
           if (v[0] <= vbr.to) curToIdx = i;
         }
       }
       const before = { fromIdx: curFromIdx, toIdx: curToIdx };
-      const next = (${transformExpr})(curFromIdx, curToIdx, firstIdx, lastIdx);
-      // Clamp to data bounds
-      const fromIdx = Math.max(firstIdx, Math.min(lastIdx - 5, next.fromIdx));
-      const toIdx   = Math.max(fromIdx + 5, Math.min(lastIdx, next.toIdx));
+      const next = (${transformExpr})(curFromIdx, curToIdx, firstDataIdx, lastDataIdx);
+
+      // Guardrail #2: clamp fromIdx and toIdx to the actual data range
+      // (firstDataIdx/lastDataIdx are signed and reflect where bars
+      // actually exist — could be negative on TV Desktop builds).
+      let fromIdx = Math.max(firstDataIdx, Math.min(lastDataIdx - 5, next.fromIdx));
+      let toIdx   = Math.max(fromIdx + 5, Math.min(lastDataIdx, next.toIdx));
+
+      // Guardrail #3: refuse if the clamped fromIdx has no data anyway.
+      // Should be impossible after guardrail #2, but defensive.
+      if (!bars.valueAt(fromIdx)) {
+        return {
+          ok: false,
+          reason: 'fromIdx ' + fromIdx + ' has no bar data after clamp; refusing to wedge renderer',
+          requested: next, firstDataIdx, lastDataIdx,
+        };
+      }
+
+      // Guardrail #4: refuse windows with fewer than 5 bars.
+      if (toIdx - fromIdx < 5) {
+        return {
+          ok: false,
+          reason: 'window of ' + (toIdx - fromIdx) + ' bars below 5-bar minimum; refusing to apply',
+          fromIdx, toIdx,
+        };
+      }
+
       try {
         ts.zoomToBarsRange(fromIdx, toIdx);
       } catch (e) {
         return { ok: false, reason: 'zoomToBarsRange threw: ' + e.message };
       }
-      return { ok: true, before, after: { fromIdx, toIdx }, totalBars: lastIdx - firstIdx };
+      return { ok: true, before, after: { fromIdx, toIdx }, firstDataIdx, lastDataIdx };
     })()
   `);
   return { success: true, label, detail: unwrap(result) };
