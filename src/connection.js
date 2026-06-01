@@ -1,4 +1,15 @@
 import CDP from 'chrome-remote-interface';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOG_FILE = path.resolve(__dirname, '../../logs/tradingview-mcp.log');
+
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch {}
+}
 
 let client = null;
 let targetInfo = null;
@@ -6,6 +17,17 @@ const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
+const CONNECT_TIMEOUT_MS = 10000;  // 10s for connection/liveness checks
+const EVAL_TIMEOUT_MS    = 30000;  // 30s for evaluate() calls
+const KEEPALIVE_MS       = 5 * 60 * 1000; // 5 min heartbeat
+let keepaliveTimer = null;
+
+function withTimeout(promise, ms, msg) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms)),
+  ]);
+}
 
 // Known direct API paths discovered via live probing (see PROBE_RESULTS.md)
 const KNOWN_PATHS = {
@@ -31,10 +53,15 @@ export { KNOWN_PATHS };
 export async function getClient() {
   if (client) {
     try {
-      // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      // Quick liveness check — timeout if browser is unresponsive
+      await withTimeout(
+        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        CONNECT_TIMEOUT_MS,
+        'TradingView liveness check timed out — browser may be unresponsive',
+      );
       return client;
-    } catch {
+    } catch (err) {
+      log(`liveness check failed: ${err.message}`);
       client = null;
       targetInfo = null;
     }
@@ -53,23 +80,40 @@ export async function connect() {
       targetInfo = target;
       client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
 
+      // Detect silent WebSocket drops immediately — null the client so the
+      // next tool call triggers a fresh connect() instead of hanging.
+      client.on('disconnect', () => {
+        log('WebSocket disconnected — clearing cached client');
+        client = null;
+        targetInfo = null;
+        stopKeepalive();
+      });
+
       // Enable required domains
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
 
+      log(`connected to ${target.url} (id: ${target.id})`);
+      startKeepalive();
       return client;
     } catch (err) {
       lastError = err;
+      log(`connect attempt ${attempt + 1}/${MAX_RETRIES} failed: ${err.message}`);
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));
     }
   }
+  log(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
 async function findChartTarget() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const resp = await withTimeout(
+    fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`),
+    CONNECT_TIMEOUT_MS,
+    'CDP target discovery timed out — is TradingView running with remote debugging?',
+  );
   const targets = await resp.json();
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
@@ -86,12 +130,16 @@ export async function getTargetInfo() {
 
 export async function evaluate(expression, opts = {}) {
   const c = await getClient();
-  const result = await c.Runtime.evaluate({
-    expression,
-    returnByValue: true,
-    awaitPromise: opts.awaitPromise ?? false,
-    ...opts,
-  });
+  const result = await withTimeout(
+    c.Runtime.evaluate({
+      expression,
+      returnByValue: true,
+      awaitPromise: opts.awaitPromise ?? false,
+      ...opts,
+    }),
+    EVAL_TIMEOUT_MS,
+    'TradingView evaluation timed out (30s) — browser may be unresponsive',
+  );
   if (result.exceptionDetails) {
     const msg = result.exceptionDetails.exception?.description
       || result.exceptionDetails.text
@@ -105,7 +153,32 @@ export async function evaluateAsync(expression) {
   return evaluate(expression, { awaitPromise: true });
 }
 
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(async () => {
+    if (!client) { stopKeepalive(); return; }
+    try {
+      await withTimeout(
+        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        CONNECT_TIMEOUT_MS,
+        'keepalive ping timed out',
+      );
+    } catch (err) {
+      // Connection is dead — null it so next tool call reconnects fresh
+      log(`keepalive failed: ${err.message} — clearing client`);
+      client = null;
+      targetInfo = null;
+      stopKeepalive();
+    }
+  }, KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+}
+
 export async function disconnect() {
+  stopKeepalive();
   if (client) {
     try { await client.close(); } catch {}
     client = null;
