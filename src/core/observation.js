@@ -54,3 +54,28 @@ export const ACTIVE_CHART_IDENTITY_FN = `(function (api) {
 export const OBSERVED_AT_FN = `(function () {
   return { observed_at_ms: Date.now(), observed_at_basis: 'provider_retrieval' };
 })`;
+
+/**
+ * ★★ A CALLER VALUE EMBEDDED IN PAGE JAVASCRIPT, AS INERT DATA.
+ *
+ * ⛔ THE DEFECT THIS CLOSES. getQuote built its page script with `var sym = '${symbol || ''}';`,
+ *    so a caller/model-supplied symbol became JAVASCRIPT SOURCE — evaluated before anything else in
+ *    the expression, including the active-chart identity read. A value of
+ *    `x'; someObject.full_name = 'OANDA:EURUSD'; var y='` runs as code, and the identity this
+ *    provider emits is then whatever the caller wrote. That does not merely leak: it invalidates
+ *    the entire claim that `active_chart` is independently observed.
+ *
+ * ⛔ NOT QUOTE-ESCAPING. Replacing only `'` (as core/chart.js does) leaves backslash, newline and
+ *    U+2028/U+2029 as escapes out of the literal. JSON.stringify emits a complete, correctly
+ *    escaped string literal — and since JSON is a subset of JS expression syntax for strings, the
+ *    result parses as exactly one string with exactly the caller's characters.
+ *
+ * ★ U+2028/U+2029 are legal inside JSON strings and, before ES2019, illegal raw in JS literals.
+ *   Modern engines accept them, but the page's engine is not ours to assume, so they are escaped
+ *   explicitly rather than left to chance.
+ */
+export function jsStringLiteral(value) {
+  return JSON.stringify(String(value ?? ''))
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}

@@ -168,7 +168,10 @@ describe('the wiring — data.js actually emits these, from the api and not the 
 
   test('⛔ the caller argument still only reaches the legacy `symbol` field', () => {
     // It is not removed — that would break callers — but it must not be the identity anyone types.
-    assert.match(CODE, /var sym = '\$\{symbol \|\| ''\}'/, 'the legacy echo is still there…');
+    // ⛔ UPDATED WITH THE INJECTION FIX. This used to assert the RAW interpolation was present —
+    //    `var sym = '${symbol}'` — which is exactly the vulnerability. The caller value still
+    //    reaches the legacy field, but now as a SERIALIZED literal that cannot execute.
+    assert.match(CODE, /var sym = \$\{jsStringLiteral\(symbol\)\}/, 'the legacy echo is still there…');
     assert.match(CODE, /var quote = \{ symbol: sym \}/, '…and still populates `symbol`');
     assert.ok(!/active_chart[^\n]*sym\b/.test(CODE), 'but never the observed identity');
   });

@@ -2,7 +2,7 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
-import { ACTIVE_CHART_IDENTITY_FN, OBSERVED_AT_FN } from './observation.js';
+import { ACTIVE_CHART_IDENTITY_FN, OBSERVED_AT_FN, jsStringLiteral } from './observation.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -258,11 +258,18 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
 }
 
-export async function getQuote({ symbol } = {}) {
-  const data = await evaluate(`
+/**
+ * ★★ THE COMPLETE PAGE EXPRESSION getQuote SENDS — exported so it can be TESTED.
+ *
+ * ⛔ Testing the identity helper alone proved nothing about this: the injection lives in how the
+ *    surrounding expression is ASSEMBLED, not in the helper. A test must be able to generate the
+ *    exact bytes for a hostile symbol and run them.
+ */
+export function buildQuoteExpression(symbol) {
+  return `
     (function() {
       var api = ${CHART_API};
-      var sym = '${symbol || ''}';
+      var sym = ${jsStringLiteral(symbol)};
       if (!sym) { try { sym = api.symbol(); } catch(e) {} }
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
       var ext = {};
@@ -295,7 +302,11 @@ export async function getQuote({ symbol } = {}) {
       quote.time_basis = 'bar_open';
       return quote;
     })()
-  `);
+  `;
+}
+
+export async function getQuote({ symbol } = {}) {
+  const data = await evaluate(buildQuoteExpression(symbol));
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
   return { success: true, ...data };
 }
