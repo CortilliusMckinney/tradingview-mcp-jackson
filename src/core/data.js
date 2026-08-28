@@ -2,6 +2,7 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
+import { ACTIVE_CHART_IDENTITY_FN, OBSERVED_AT_FN, jsStringLiteral } from './observation.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -65,6 +66,7 @@ export async function getOhlcv({ count, summary } = {}) {
   try {
     data = await evaluate(`
       (function() {
+        var api = ${CHART_API};
         var bars = ${BARS_PATH};
         if (!bars || typeof bars.lastIndex !== 'function') return null;
         var result = [];
@@ -74,7 +76,11 @@ export async function getOhlcv({ count, summary } = {}) {
           var v = bars.valueAt(i);
           if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
         }
-        return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
+        var obs = (${OBSERVED_AT_FN})();
+        return {bars: result, total_bars: bars.size(), source: 'direct_bars',
+                active_chart: (${ACTIVE_CHART_IDENTITY_FN})(api),
+                observed_at_ms: obs.observed_at_ms, observed_at_basis: obs.observed_at_basis,
+                time_basis: 'bar_open'};
       })()
     `);
   } catch { data = null; }
@@ -92,6 +98,13 @@ export async function getOhlcv({ count, summary } = {}) {
     const last = bars[bars.length - 1];
     return {
       success: true, bar_count: bars.length,
+      // ⛔ CARRIED, NOT RECOMPUTED. The summary is a projection of the same observation, so it
+      //    must not lose the identity that makes it attributable — and must not gain a new one.
+      active_chart: data.active_chart, observed_at_ms: data.observed_at_ms,
+      observed_at_basis: data.observed_at_basis, time_basis: 'bar_open',
+      // ★ `summary` is DECLARED so a consumer can tell a projection from a full series rather
+      //   than inferring it from which keys happen to be absent.
+      shape: 'summary',
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
@@ -103,7 +116,10 @@ export async function getOhlcv({ count, summary } = {}) {
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return { success: true, bar_count: data.bars.length, total_available: data.total_bars,
+    source: data.source, shape: 'series', active_chart: data.active_chart,
+    observed_at_ms: data.observed_at_ms, observed_at_basis: data.observed_at_basis,
+    time_basis: 'bar_open', bars: data.bars };
 }
 
 export async function getIndicator({ entity_id }) {
@@ -242,11 +258,18 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
 }
 
-export async function getQuote({ symbol } = {}) {
-  const data = await evaluate(`
+/**
+ * ★★ THE COMPLETE PAGE EXPRESSION getQuote SENDS — exported so it can be TESTED.
+ *
+ * ⛔ Testing the identity helper alone proved nothing about this: the injection lives in how the
+ *    surrounding expression is ASSEMBLED, not in the helper. A test must be able to generate the
+ *    exact bytes for a hostile symbol and run them.
+ */
+export function buildQuoteExpression(symbol) {
+  return `
     (function() {
       var api = ${CHART_API};
-      var sym = '${symbol || ''}';
+      var sym = ${jsStringLiteral(symbol)};
       if (!sym) { try { sym = api.symbol(); } catch(e) {} }
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
       var ext = {};
@@ -270,9 +293,20 @@ export async function getQuote({ symbol } = {}) {
       if (ext.description) quote.description = ext.description;
       if (ext.exchange) quote.exchange = ext.exchange;
       if (ext.type) quote.type = ext.type;
+      // BEWARE: the 'symbol' field above may be the CALLER'S argument (see :249). These are not.
+      quote.active_chart = (${ACTIVE_CHART_IDENTITY_FN})(api);
+      var obs = (${OBSERVED_AT_FN})();
+      quote.observed_at_ms = obs.observed_at_ms;
+      quote.observed_at_basis = obs.observed_at_basis;
+      // 'time' is the OPEN of the bar this value came from; named so nothing has to infer it.
+      quote.time_basis = 'bar_open';
       return quote;
     })()
-  `);
+  `;
+}
+
+export async function getQuote({ symbol } = {}) {
+  const data = await evaluate(buildQuoteExpression(symbol));
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
   return { success: true, ...data };
 }
@@ -324,6 +358,7 @@ export async function getDepth() {
 export async function getStudyValues() {
   const data = await evaluate(`
     (function() {
+      var api = ${CHART_API};
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
@@ -351,10 +386,15 @@ export async function getStudyValues() {
           if (Object.keys(values).length > 0) results.push({ name: name, values: values });
         } catch(e) {}
       }
-      return results;
+      var obs = (${OBSERVED_AT_FN})();
+      return { studies: results, active_chart: (${ACTIVE_CHART_IDENTITY_FN})(api),
+               observed_at_ms: obs.observed_at_ms, observed_at_basis: obs.observed_at_basis };
     })()
   `);
-  return { success: true, study_count: data?.length || 0, studies: data || [] };
+  // ⛔ An indicator reading is only attributable if we know WHICH chart produced it.
+  return { success: true, study_count: data?.studies?.length || 0, studies: data?.studies || [],
+    active_chart: data?.active_chart ?? null,
+    observed_at_ms: data?.observed_at_ms ?? null, observed_at_basis: data?.observed_at_basis ?? null };
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {
