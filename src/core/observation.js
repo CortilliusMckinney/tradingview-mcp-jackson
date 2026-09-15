@@ -52,11 +52,20 @@ export function withObservation(data, observedAtMs) {
 }
 
 /**
- * The clock the qualifying readers stamp with. Injectable ONLY so tests can prove the instant is
- * taken after the retrieval rather than before it; production never overrides it.
+ * The clock the qualifying readers stamp with.
+ *
+ * ⛔⛔ NO SETTER, AND THAT IS THE POINT. This was `export let observationClock` beside a
+ *    `setObservationClockForTests(fn)` mutator, with a comment promising production never called
+ *    it. A comment is not enforcement: `observed_at_ms` is authority-bearing evidence, and an
+ *    exported mutator means any importing module — now or later — can replace the clock and
+ *    manufacture observation timestamps that the consumer will accept as provider-retrieval fact.
+ *    An ESM importer cannot reassign an imported binding, so the SETTER was the whole vector;
+ *    a function declaration removes it structurally rather than by convention.
+ *
+ * ⛔ TESTS CONTROL TIME BY MOCKING `Date.now`, not by swapping this function. Time is ambient, so
+ *    the test seam belongs on the ambient thing — not on a production export that exists only to
+ *    be overridden. `observation-immutability` in the suite fails if a setter ever comes back.
  */
-export let observationClock = () => Date.now();
-
-/** @param {() => number} fn */
-export function setObservationClockForTests(fn) { observationClock = fn; }
-export function resetObservationClockForTests() { observationClock = () => Date.now(); }
+export function observationClock() {
+  return Date.now();
+}

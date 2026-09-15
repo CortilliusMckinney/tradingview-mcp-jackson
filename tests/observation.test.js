@@ -5,7 +5,9 @@
  *
  * Run: node --test --experimental-test-module-mocks tests/observation.test.js
  */
-import { describe, it, mock, beforeEach } from 'node:test';
+import { describe, it, mock, beforeEach, afterEach } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 // ── the controlled retrieval ────────────────────────────────────────────────
@@ -38,14 +40,19 @@ mock.module('../src/connection.js', {
 });
 
 const data = await import('../src/core/data.js');
-const { OBSERVED_AT_BASIS, setObservationClockForTests, resetObservationClockForTests } =
-  await import('../src/core/observation.js');
+const observation = await import('../src/core/observation.js');
+const { OBSERVED_AT_BASIS } = observation;
 
+// ⛔ TIME IS MOCKED AT THE AMBIENT SOURCE, NOT VIA A PRODUCTION SETTER. `observation.js`
+//    deliberately exports no clock mutator — see the immutability suite at the bottom of this file.
+let realDateNow;
 beforeEach(() => {
   virtualNow = BEFORE_MS;
   evaluateCalls = 0;
-  setObservationClockForTests(() => virtualNow);
+  realDateNow = Date.now;
+  Date.now = () => virtualNow;
 });
+afterEach(() => { Date.now = realDateNow; });
 
 const QUOTE = Object.freeze({
   symbol: 'OANDA:XAUUSD', time: BAR_OPEN_S, open: 4295.7, high: 4299.1, low: 4290.4,
@@ -188,4 +195,37 @@ describe('M3 — the basis is a literal, and half a pair is not a pair', () => {
   });
 });
 
-resetObservationClockForTests();
+describe('immutability — the observation clock must stay non-replaceable', () => {
+  const SRC = readFileSync(fileURLToPath(new URL('../src/core/observation.js', import.meta.url)), 'utf8');
+  // Comments explain WHY there is no setter, so the structural checks read CODE, not prose.
+  const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('exports no mutable binding', () => {
+    assert.equal(/export\s+(let|var)\b/.test(CODE), false,
+      'an exported let/var is reassignable inside the module and invites a setter');
+  });
+
+  it('exports no setter/mutator at all', () => {
+    // ⛔ ANCHORED AT THE START OF THE NAME. My first version made the verb prefix OPTIONAL, so it
+    //    flagged `observationClock` — the READER — and would have passed only by deleting the
+    //    thing it exists to protect. The property is "no export whose name is an act of
+    //    replacement", so the verb has to be the first thing in the name.
+    const exported = [...CODE.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)/g)].map((m) => m[1]);
+    const mutators = exported.filter((n) => /^(set|reset|override|replace|inject|swap|stub|mock)[A-Z_]/.test(n));
+    assert.deepEqual(mutators, [], `no export may replace the clock; found: ${mutators.join(', ')}`);
+  });
+
+  it('the module surface is exactly the three intended exports', () => {
+    assert.deepEqual(Object.keys(observation).sort(),
+      ['OBSERVED_AT_BASIS', 'observationClock', 'withObservation']);
+  });
+
+  it('observationClock reads the ambient clock and cannot be swapped by an importer', () => {
+    assert.equal(typeof observation.observationClock, 'function');
+    const real = Date.now; Date.now = () => 424242;
+    try { assert.equal(observation.observationClock(), 424242, 'it must read Date.now, not a captured copy'); }
+    finally { Date.now = real; }
+    assert.throws(() => { observation.observationClock = () => 0; }, TypeError,
+      'an ESM namespace binding must be read-only');
+  });
+});
