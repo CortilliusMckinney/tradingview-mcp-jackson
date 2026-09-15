@@ -2,6 +2,7 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
+import { withObservation, observationClock } from './observation.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -79,6 +80,11 @@ export async function getOhlcv({ count, summary } = {}) {
     `);
   } catch { data = null; }
 
+  // ★ THE RETRIEVAL IS COMPLETE HERE AND NOWHERE EARLIER. Taken after the awaited evaluate has
+  //   resolved, so it times the READ rather than the request. A failed retrieval throws below and
+  //   never reaches a stamp.
+  const observedAtMs = observationClock();
+
   if (!data || !data.bars || data.bars.length === 0) {
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
   }
@@ -90,7 +96,7 @@ export async function getOhlcv({ count, summary } = {}) {
     const volumes = bars.map(b => b.volume);
     const first = bars[0];
     const last = bars[bars.length - 1];
-    return {
+    const summaryResult = {
       success: true, bar_count: bars.length,
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
@@ -101,9 +107,10 @@ export async function getOhlcv({ count, summary } = {}) {
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
+    return withObservation(summaryResult, observedAtMs);
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return withObservation({ success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars }, observedAtMs);
 }
 
 export async function getIndicator({ entity_id }) {
@@ -273,8 +280,10 @@ export async function getQuote({ symbol } = {}) {
       return quote;
     })()
   `);
+  // ★ Same boundary, same reason: after the awaited retrieval, before any shaping.
+  const observedAtMs = observationClock();
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
-  return { success: true, ...data };
+  return withObservation({ success: true, ...data }, observedAtMs);
 }
 
 export async function getDepth() {
@@ -354,7 +363,8 @@ export async function getStudyValues() {
       return results;
     })()
   `);
-  return { success: true, study_count: data?.length || 0, studies: data || [] };
+  const observedAtMs = observationClock();
+  return withObservation({ success: true, study_count: data?.length || 0, studies: data || [] }, observedAtMs);
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {
