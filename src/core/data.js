@@ -3,6 +3,7 @@
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
 import { withObservation, observationClock } from './observation.js';
+import { FEED_STATUS_FN, MAPPING_SOURCE_IDENTITIES } from './feed-status.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -75,7 +76,10 @@ export async function getOhlcv({ count, summary } = {}) {
           var v = bars.valueAt(i);
           if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
         }
-        return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
+        // ONE SERIES OBJECT, ONE OBSERVATION: the bars above come from this same mainSeries,
+        // so the data-mode describes THESE values, not a second separately-fetched read.
+        var __fs = (${FEED_STATUS_FN})(window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries(), ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)});
+        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars'}, __fs);
       })()
     `);
   } catch { data = null; }
@@ -107,10 +111,15 @@ export async function getOhlcv({ count, summary } = {}) {
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
+    // ⛔ CARRIED, NOT RE-READ. The summary is a projection of the same observation, so it must
+    //    not acquire a feed status of its own.
+    if (typeof data.feed_status === 'string') summaryResult.feed_status = data.feed_status;
     return withObservation(summaryResult, observedAtMs);
   }
 
-  return withObservation({ success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars }, observedAtMs);
+  const fullResult = { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  if (typeof data.feed_status === 'string') fullResult.feed_status = data.feed_status;
+  return withObservation(fullResult, observedAtMs);
 }
 
 export async function getIndicator({ entity_id }) {
@@ -277,6 +286,8 @@ export async function getQuote({ symbol } = {}) {
       if (ext.description) quote.description = ext.description;
       if (ext.exchange) quote.exchange = ext.exchange;
       if (ext.type) quote.type = ext.type;
+      // SAME EVALUATE, SAME SERIES: the bar series this quote was built from is this mainSeries.
+      Object.assign(quote, (${FEED_STATUS_FN})(window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries(), ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)}));
       return quote;
     })()
   `);
