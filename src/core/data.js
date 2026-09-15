@@ -3,11 +3,24 @@
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
 import { withObservation, observationClock } from './observation.js';
+import { FEED_STATUS_FN, MAPPING_SOURCE_IDENTITIES } from './feed-status.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
+// ⛔⛔ ONE SERIES OBJECT, STRUCTURALLY. The feed status and the values must describe the SAME
+//    observation, and the first version only claimed that in a comment: it read
+//    `mainSeries().bars()` and then called `mainSeries()` again for the status. Inside one
+//    synchronous evaluate those are probably the same object — but "probably the same accessor
+//    result" is not a provenance guarantee, and this field is authority-bearing. The qualifying
+//    readers now capture the series ONCE and derive both from it.
+// ★ DERIVED FROM BARS_PATH, never typed a second time: a parallel copy of the path is exactly the
+//   drift that lets the two diverge later.
+const MAIN_SERIES_PATH = BARS_PATH.replace(/\.bars\(\)\s*$/, '');
+if (MAIN_SERIES_PATH === BARS_PATH) {
+  throw new Error('mainSeriesBars no longer ends in .bars() — the series path cannot be derived');
+}
 
 function buildGraphicsJS(collectionName, mapKey, filter) {
   return `
@@ -66,7 +79,9 @@ export async function getOhlcv({ count, summary } = {}) {
   try {
     data = await evaluate(`
       (function() {
-        var bars = ${BARS_PATH};
+        var series = ${MAIN_SERIES_PATH};
+        if (!series || typeof series.bars !== 'function') return null;
+        var bars = series.bars();
         if (!bars || typeof bars.lastIndex !== 'function') return null;
         var result = [];
         var end = bars.lastIndex();
@@ -75,7 +90,10 @@ export async function getOhlcv({ count, summary } = {}) {
           var v = bars.valueAt(i);
           if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
         }
-        return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
+        // ONE SERIES OBJECT, ONE OBSERVATION: the bars above come from this same mainSeries,
+        // so the data-mode describes THESE values, not a second separately-fetched read.
+        var __fs = (${FEED_STATUS_FN})(series, ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)});
+        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars'}, __fs);
       })()
     `);
   } catch { data = null; }
@@ -107,10 +125,15 @@ export async function getOhlcv({ count, summary } = {}) {
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
+    // ⛔ CARRIED, NOT RE-READ. The summary is a projection of the same observation, so it must
+    //    not acquire a feed status of its own.
+    if (typeof data.feed_status === 'string') summaryResult.feed_status = data.feed_status;
     return withObservation(summaryResult, observedAtMs);
   }
 
-  return withObservation({ success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars }, observedAtMs);
+  const fullResult = { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  if (typeof data.feed_status === 'string') fullResult.feed_status = data.feed_status;
+  return withObservation(fullResult, observedAtMs);
 }
 
 export async function getIndicator({ entity_id }) {
@@ -258,7 +281,8 @@ export async function getQuote({ symbol } = {}) {
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
       var ext = {};
       try { ext = api.symbolExt() || {}; } catch(e) {}
-      var bars = ${BARS_PATH};
+      var series = ${MAIN_SERIES_PATH};
+      var bars = (series && typeof series.bars === 'function') ? series.bars() : null;
       var quote = { symbol: sym };
       if (bars && typeof bars.lastIndex === 'function') {
         var last = bars.valueAt(bars.lastIndex());
@@ -277,6 +301,8 @@ export async function getQuote({ symbol } = {}) {
       if (ext.description) quote.description = ext.description;
       if (ext.exchange) quote.exchange = ext.exchange;
       if (ext.type) quote.type = ext.type;
+      // SAME EVALUATE, SAME SERIES: the bar series this quote was built from is this mainSeries.
+      Object.assign(quote, (${FEED_STATUS_FN})(series, ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)}));
       return quote;
     })()
   `);

@@ -29,7 +29,14 @@ let evaluateCalls;
 
 mock.module('../src/connection.js', {
   namedExports: {
-    KNOWN_PATHS: { chartApi: 'CHART_API', mainSeriesBars: 'BARS' },
+    // ⛔ PRODUCTION-SHAPED ON PURPOSE. This was 'BARS', which does not end in `.bars()`; data.js
+    //    derives the main-series path from this constant and refuses a shape it cannot derive from,
+    //    so the old fake could not satisfy the module's own precondition. A fixture that cannot be
+    //    loaded by the code it exercises proves nothing about it.
+    KNOWN_PATHS: {
+      chartApi: 'window.TradingViewApi._activeChartWidgetWV.value()',
+      mainSeriesBars: 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()',
+    },
     async evaluate() {
       evaluateCalls += 1;
       virtualNow += RETRIEVAL_MS;                  // the read takes time
