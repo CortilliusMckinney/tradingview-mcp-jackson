@@ -82,7 +82,13 @@ describe('E-G · absence beats a guess', () => {
 let nextPayload; let lastInput;
 mock.module('../src/connection.js', {
   namedExports: {
-    KNOWN_PATHS: { chartApi: 'API', mainSeriesBars: 'BARS' },
+    // ⛔ THE FAKE MUST BE SHAPED LIKE PRODUCTION. It was 'BARS', which does not end in `.bars()` —
+    //    so data.js's derivation guard threw at module load and took most of the suite with it.
+    //    A fixture that cannot satisfy the module's own precondition tests nothing.
+    KNOWN_PATHS: {
+      chartApi: 'window.TradingViewApi._activeChartWidgetWV.value()',
+      mainSeriesBars: 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()',
+    },
     async evaluate(expr) { lastInput = expr; return typeof nextPayload === 'function' ? nextPayload() : nextPayload; },
     async evaluateAsync() { return null; },
   },
@@ -95,15 +101,25 @@ const QUOTE = { symbol: 'OANDA:XAUUSD', exchange: 'OANDA', time: 1_789_491_600, 
 const BARS = { bars: [{ time: 1, open: 1, high: 2, low: 0.5, close: 1.5, volume: 9 }], total_bars: 1, source: 'direct_bars', feed_status: 'realtime' };
 
 describe('H-M · wiring', () => {
-  it('H · the status is read in the SAME evaluate as the values', () => {
-    // The injected expression must contain both the bar read and the feed-status call.
-    nextPayload = { ...QUOTE };
-    return data.getQuote({}).then(() => {
-      assert.match(lastInput, /BARS/, 'the values come from the bar series');
-      assert.match(lastInput, /performance\.getEntriesByType/, 'and the gate runs in the same expression');
-      assert.match(lastInput, /mainSeries\(\)/);
-      assert.equal((lastInput.match(/mainSeries\(\)/g) || []).length >= 1, true);
-    });
+  it('H · SAME OBJECT, not merely same evaluate — one mainSeries() per expression', async () => {
+    // ⛔⛔ THE REVIEW FINDING THIS PINS. The first version read `mainSeries().bars()` and then
+    //    called `mainSeries()` again for the status, while a comment claimed one object. Inside one
+    //    synchronous evaluate those are probably identical — but "probably the same accessor
+    //    result" is not provenance. This asserted `>= 1`, which proves presence and nothing else.
+    for (const [name, run] of [
+      ['quote', async () => { nextPayload = { ...QUOTE }; await data.getQuote({}); }],
+      ['ohlcv', async () => { nextPayload = () => structuredClone(BARS); await data.getOhlcv({ count: 1 }); }],
+    ]) {
+      await run();
+      assert.equal((lastInput.match(/mainSeries\(\)/g) || []).length, 1,
+        `${name}: the series must be looked up EXACTLY once`);
+      assert.match(lastInput, /var series = /, `${name}: and captured in a variable`);
+      assert.match(lastInput, /series\.bars\(\)/, `${name}: the values come from THAT series`);
+      assert.match(lastInput, /\)\(series, \[/, `${name}: and the gate receives THAT series`);
+      assert.equal(/\)\(window\.TradingViewApi/.test(lastInput), false,
+        `${name}: the gate must not re-derive the series from the root`);
+      assert.match(lastInput, /performance\.getEntriesByType/, `${name}: same expression`);
+    }
   });
   it('I · a caller symbol argument cannot alter feed_status', async () => {
     nextPayload = { ...QUOTE, symbol: 'BTCUSD' };
