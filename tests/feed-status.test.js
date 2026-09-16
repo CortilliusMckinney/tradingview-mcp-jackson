@@ -126,7 +126,12 @@ describe('H-M · wiring', () => {
     const r = await data.getQuote({ symbol: 'BTCUSD' });
     assert.equal(r.feed_status, 'realtime', 'still the series fact');
     assert.equal(r.symbol, 'BTCUSD', 'and the pre-existing echo behaviour is untouched');
-    assert.equal(lastInput.includes("var sym = 'BTCUSD'"), true);
+    // ⛔ UPDATED BY THE IDENTITY PR, AND THE OLD FORM WAS THE BUG. This asserted
+    //    `var sym = 'BTCUSD'` — the RAW single-quoted interpolation, which made a caller symbol
+    //    executable JavaScript. The caller's bytes still reach the page, and must; they now arrive
+    //    as a serialized literal instead of as source. The meaning of the assertion is unchanged.
+    assert.equal(lastInput.includes('var sym = "BTCUSD";'), true,
+      'the caller symbol still reaches the page, now as inert data');
   });
 
   it('I2 · the value is the PAGE\'s, provably — a caller argument cannot override it', async () => {

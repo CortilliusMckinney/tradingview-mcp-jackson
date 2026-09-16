@@ -4,6 +4,7 @@
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
 import { withObservation, observationClock } from './observation.js';
 import { FEED_STATUS_FN, MAPPING_SOURCE_IDENTITIES } from './feed-status.js';
+import { ACTIVE_CHART_IDENTITY_FN, jsStringLiteral } from './chart-identity.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -79,6 +80,7 @@ export async function getOhlcv({ count, summary } = {}) {
   try {
     data = await evaluate(`
       (function() {
+        var api = ${CHART_API};
         var series = ${MAIN_SERIES_PATH};
         if (!series || typeof series.bars !== 'function') return null;
         var bars = series.bars();
@@ -93,7 +95,10 @@ export async function getOhlcv({ count, summary } = {}) {
         // ONE SERIES OBJECT, ONE OBSERVATION: the bars above come from this same mainSeries,
         // so the data-mode describes THESE values, not a second separately-fetched read.
         var __fs = (${FEED_STATUS_FN})(series, ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)});
-        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars'}, __fs);
+        // ONE EVALUATE, ONE OBSERVATION: the instrument identity is read in the same synchronous
+        // page call as these bars and this feed status, so all three describe one chart state.
+        var __id = (${ACTIVE_CHART_IDENTITY_FN})(api);
+        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars', active_chart: __id}, __fs);
       })()
     `);
   } catch { data = null; }
@@ -126,13 +131,17 @@ export async function getOhlcv({ count, summary } = {}) {
       last_5_bars: bars.slice(-5),
     };
     // ⛔ CARRIED, NOT RE-READ. The summary is a projection of the same observation, so it must
-    //    not acquire a feed status of its own.
+    //    not acquire a feed status — or an identity — of its own. Recomputing identity here would
+    //    read the chart a second time, and the projection could then describe a different chart
+    //    than the bars it was projected from.
     if (typeof data.feed_status === 'string') summaryResult.feed_status = data.feed_status;
+    if (data.active_chart) summaryResult.active_chart = data.active_chart;
     return withObservation(summaryResult, observedAtMs);
   }
 
   const fullResult = { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
   if (typeof data.feed_status === 'string') fullResult.feed_status = data.feed_status;
+  if (data.active_chart) fullResult.active_chart = data.active_chart;
   return withObservation(fullResult, observedAtMs);
 }
 
@@ -272,11 +281,23 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
 }
 
-export async function getQuote({ symbol } = {}) {
-  const data = await evaluate(`
+/**
+ * ★★ THE EXACT BYTES PRODUCTION SENDS TO THE PAGE, as a value a test can execute.
+ *
+ * ⛔ THE CALLER'S SYMBOL IS DATA, NOT SOURCE. It was `var sym = '<arg>';` — raw interpolation — so
+ *    a caller/model-supplied symbol became JavaScript that ran BEFORE everything after it,
+ *    including the identity read below. That made `active_chart` forgeable and the "independent
+ *    observation" claim false. `jsStringLiteral` emits a complete escaped literal instead.
+ *
+ * ⛔ THE ECHO KEEPS THE CALLER'S EXACT BYTES. Only the representation in the generated source is
+ *    escaped; `quote.symbol` still returns what the caller sent, because that is the existing
+ *    contract. It simply cannot execute.
+ */
+export function quotePageExpression(symbol) {
+  return `
     (function() {
       var api = ${CHART_API};
-      var sym = '${symbol || ''}';
+      var sym = ${jsStringLiteral(symbol || '')};
       if (!sym) { try { sym = api.symbol(); } catch(e) {} }
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
       var ext = {};
@@ -303,9 +324,17 @@ export async function getQuote({ symbol } = {}) {
       if (ext.type) quote.type = ext.type;
       // SAME EVALUATE, SAME SERIES: the bar series this quote was built from is this mainSeries.
       Object.assign(quote, (${FEED_STATUS_FN})(series, ${JSON.stringify(MAPPING_SOURCE_IDENTITIES)}));
+      // ⛔ THE sym VARIABLE ABOVE IS THE CALLER'S ECHO. This is the observation — read from the chart api, by
+      //    a helper with no channel for a request value. The two may disagree, and when they do it
+      //    is the identity that is true.
+      quote.active_chart = (${ACTIVE_CHART_IDENTITY_FN})(api);
       return quote;
     })()
-  `);
+  `;
+}
+
+export async function getQuote({ symbol } = {}) {
+  const data = await evaluate(quotePageExpression(symbol));
   // ★ Same boundary, same reason: after the awaited retrieval, before any shaping.
   const observedAtMs = observationClock();
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
@@ -359,6 +388,7 @@ export async function getDepth() {
 export async function getStudyValues() {
   const data = await evaluate(`
     (function() {
+      var api = ${CHART_API};
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
@@ -386,11 +416,17 @@ export async function getStudyValues() {
           if (Object.keys(values).length > 0) results.push({ name: name, values: values });
         } catch(e) {}
       }
-      return results;
+      // SAME EVALUATE: the chart these study values were read from is the chart identified here.
+      return { studies: results, active_chart: (${ACTIVE_CHART_IDENTITY_FN})(api) };
     })()
   `);
   const observedAtMs = observationClock();
-  return withObservation({ success: true, study_count: data?.length || 0, studies: data || [] }, observedAtMs);
+  const studies = data?.studies ?? [];
+  const studyResult = { success: true, study_count: studies.length, studies };
+  // ⛔ NO FEED STATUS HERE. Study values are derived series, and E1 deliberately did not qualify a
+  //    data-mode for them. Identity is a different fact and is safe to state; latency is not.
+  if (data?.active_chart) studyResult.active_chart = data.active_chart;
+  return withObservation(studyResult, observedAtMs);
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {
