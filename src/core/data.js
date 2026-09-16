@@ -4,6 +4,7 @@
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
 import { withObservation, observationClock } from './observation.js';
 import { FEED_STATUS_FN, MAPPING_SOURCE_IDENTITIES } from './feed-status.js';
+import { SERIES_RESOLUTION_FN } from './series-resolution.js';
 import { ACTIVE_CHART_IDENTITY_FN, jsStringLiteral } from './chart-identity.js';
 
 const MAX_OHLCV_BARS = 500;
@@ -98,7 +99,11 @@ export async function getOhlcv({ count, summary } = {}) {
         // ONE EVALUATE, ONE OBSERVATION: the instrument identity is read in the same synchronous
         // page call as these bars and this feed status, so all three describe one chart state.
         var __id = (${ACTIVE_CHART_IDENTITY_FN})(api);
-        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars', active_chart: __id}, __fs);
+        // ONE EVALUATE, ONE OBSERVATION: the series resolution is read in this SAME synchronous
+        // page call, so the cadence a consumer checks the gaps against describes THESE bars — not
+        // a chart state that could have changed between two separate reads.
+        var __res = (${SERIES_RESOLUTION_FN})(api);
+        return Object.assign({bars: result, total_bars: bars.size(), source: 'direct_bars', active_chart: __id}, __fs, __res);
       })()
     `);
   } catch { data = null; }
@@ -136,12 +141,14 @@ export async function getOhlcv({ count, summary } = {}) {
     //    than the bars it was projected from.
     if (typeof data.feed_status === 'string') summaryResult.feed_status = data.feed_status;
     if (data.active_chart) summaryResult.active_chart = data.active_chart;
+    if (typeof data.resolution === 'string') summaryResult.resolution = data.resolution;
     return withObservation(summaryResult, observedAtMs);
   }
 
   const fullResult = { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
   if (typeof data.feed_status === 'string') fullResult.feed_status = data.feed_status;
   if (data.active_chart) fullResult.active_chart = data.active_chart;
+  if (typeof data.resolution === 'string') fullResult.resolution = data.resolution;
   return withObservation(fullResult, observedAtMs);
 }
 

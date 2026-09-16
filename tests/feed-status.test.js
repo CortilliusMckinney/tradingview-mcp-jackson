@@ -159,7 +159,11 @@ describe('H-M · wiring', () => {
     // FEED_STATUS_FN already opens with '(', so the emitted text is `var __fs = ((function …`.
     assert.match(lastInput, /var __fs = \(+function/, 'the status must be assigned FROM the gate');
     assert.equal(/__fs\s*=\s*\{\s*\}/.test(lastInput), false, 'never stubbed out');
-    assert.match(lastInput, /Object\.assign\(\{bars:[\s\S]*?__fs\)/, 'and merged into the values result');
+    // ⛔ `__fs` MUST BE AN ARGUMENT, not necessarily the LAST one. This pattern used to require
+    //    `__fs)` — the closing paren — which pinned the argument ORDER rather than the property
+    //    under test. Adding a second same-evaluate provider fact (`__res`, the series resolution)
+    //    turned it red without anything about feed status having changed.
+    assert.match(lastInput, /Object\.assign\(\{bars:[\s\S]*?,\s*__fs\s*[,)]/, 'and merged into the values result');
     assert.equal((lastInput.match(/performance\.getEntriesByType/g) || []).length, 1,
       'exactly one gate, in the same expression as the values');
   });
